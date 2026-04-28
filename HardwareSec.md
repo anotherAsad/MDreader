@@ -96,7 +96,7 @@ What I changed in aes.c
   ```
 
 2) Injected fault at the beginning of the final round (on M9):
-   - In `Cipher()`, after round Nr-1 AddRoundKey and before final-round SubBytes/ShiftRows+AddRoundKey, flips one chosen bit:
+   - In `Cipher()`, after round Nr-1 AddRoundKey and before final round of _SubBytes_, _ShiftRows_ and _AddRoundKey_, flip one chosen bit:
      ```state[CORRUPTIBLE_LOC/4][CORRUPTIBLE_LOC%4] ^= CORRUPTIBLE_BYTE;```
    - This exactly emulates a 1-bit fault model used by theoretical DFA.
 
@@ -115,8 +115,8 @@ What I changed in aes.c
      __Diff = correct_cyphertext XOR faulty_ciphertext.__
    - Apply InvShiftRows(Diff) to map the non-zero difference back to the corresponding $M_9$ byte position.
    - For all guesses $x$ in $[0..255]$, test DFA equation:
-     $SBox(x) \oplus SBox(x \oplus e) == NonZeroByte$
-     where __e__ = CORRUPTIBLE_BYTE.
+     $$$SBox(x) \oplus SBox(x \oplus e) == NonZeroByte$$$
+     where $e$ = CORRUPTIBLE_BYTE.
    - If any byte $x$ satisfies the equation, it is a possible byte of $M_9$.
    - Keep candidate set from first fault, intersect with candidate sets from subsequent faults using `to_keep[]` array, and stop when only one candidate remains.
    - Store unique result in `M9_recovered[CORRUPTIBLE_LOC]` and set `SIG_M9_RECOVERED = 1`.
