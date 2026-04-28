@@ -51,7 +51,7 @@ What I changed in test.c
 
     // Iterate over all 16 bytes (CORRUPTIBLE_LOC) and 8 bits within each byte to introduce errors.
     for(CORRUPTIBLE_LOC = 0; CORRUPTIBLE_LOC < 16; CORRUPTIBLE_LOC++) {
-        printf("=============== CORRUPTIBLE_LOC: %d ("===============\n", CORRUPTIBLE_LOC);
+        printf("=============== CORRUPTIBLE_LOC: %d ===============\n", CORRUPTIBLE_LOC);
 
         SIG_M9_RECOVERED = 0;
 
@@ -118,13 +118,129 @@ What I changed in aes.c
      $SBox(x) \oplus SBox(x \oplus e) == NonZeroByte$
      where __e__ = CORRUPTIBLE_BYTE.
    - If any byte $x$ satisfies the equation, it is a possible byte of $M_9$.
-   - Keep candidate set from first fault, intersect with candidate sets from subsequent faults, and stop when one candidate remains.
-   - Store unique result in M9_recovered[CORRUPTIBLE_LOC] and set SIG_M9_RECOVERED = 1.
+   - Keep candidate set from first fault, intersect with candidate sets from subsequent faults using `to_keep[]` array, and stop when only one candidate remains.
+   - Store unique result in `M9_recovered[CORRUPTIBLE_LOC]` and set `SIG_M9_RECOVERED = 1`.
+
+   In code, this looks like:
+   ```C
+   if(HIJACK) {
+      printf("\n\t\t:: [Searching for cyphertext anomaly...]\n");
+      int non_zero_idx  = -1;
+      uint8_t non_zero_byte = 0;
+      state_t new_state = {0};
+
+      for(int i=0; i<16; i++) {
+         new_state[i/4][i%4] = correct_cyphertext[i] ^ buf[i];
+
+         if(non_zero_idx == -1 && new_state[i/4][i%4] != 0) {
+            non_zero_idx = i;
+            non_zero_byte = new_state[i/4][i%4];
+         }
+      }
+
+      print_state(new_state, " [Diff State]        : ");
+
+      InvShiftRows(&new_state);
+
+      print_state(new_state, " [Post InvShiftRows] : ");
+
+      // try the byte values:
+      printf("\t\t:: non_zero_idx: %d, non_zero_byte: 0x%02X\n", non_zero_idx, non_zero_byte);
+      printf("\t\t:: Byte values that satisfy `SB(M9) ^ SB(M9 ^ e) = %02X`\n\n", non_zero_byte);
+
+      static int plausible_M9[14];
+      static int plausible_M9_count;
+      
+      int to_keep[14] = {0};
+      int count = 0;
+
+      // reset the plausible bytes list
+      if(CORRUPTIBLE_BYTE == 0x01) {
+         plausible_M9_count = 0;
+
+         for(int i=0; i<14; i++)
+            plausible_M9[i] = 0;
+      }
+
+      // Iterate over all possible byte values and see if the equation holds.
+      // If it does, list all possible candidates. Keep discarding candidates
+      // from other single bit-faults till we are only left with one candidate.
+      // That is the true M9 byte.
+      for(unsigned byte = 0; byte < 256; byte++) {
+         if(non_zero_byte == (getSBoxValue(byte) ^  getSBoxValue(byte ^ CORRUPTIBLE_BYTE))) {
+            if(byte % 8 == 0)
+               printf("\n");
+            
+            printf("\t\t:: %02X", byte);
+
+            if(CORRUPTIBLE_BYTE == 0x1) {
+               plausible_M9[plausible_M9_count++] = byte;
+            }
+            else {
+               for(int i = 0; i < plausible_M9_count; i++) {
+                  if(byte == plausible_M9[i])
+                     to_keep[count++] = byte;
+               }
+            }
+         }
+      }
+
+      if(CORRUPTIBLE_BYTE != 0x01) {
+         // copy back
+         for(int i = 0; i < count; i++) {
+            plausible_M9[i] = to_keep[i]; 
+         }
+         
+         plausible_M9_count = count;
+      }
+
+      // List the plausible M9. If it is only one, 
+      if(plausible_M9_count == 1) {
+         printf("\n\t\t:: [Single M9 Byte found] : %02X\n", plausible_M9[0]);
+         M9_recovered[CORRUPTIBLE_LOC] = plausible_M9[0];
+         SIG_M9_RECOVERED = 1;
+      }
+
+      printf("\n");
+   }
+   ```
 
 4) Added round-key reconstruction helper:
-   - get_key_from_M9() computes:
-     K10 = C XOR ShiftRows(SubBytes(M9))
+   - Here, we use the known $M_9$ to get the last round key. The equation we use is:
+   $$$K_{10} = C \oplus ShiftRows(SubBytes(M_9))$$$
+   - `get_key_from_M9()` computes:
+     ```Python
+     K10 = C ^ ShiftRows(SubBytes(M9))
+     ```
    - Prints recovered K10 bytes.
+
+   Looks like:
+   ```C
+   void get_key_from_M9() {
+      //    K_10 = C xor SR(SB(M_9))
+      state_t M9_subbed_rowshifted;
+
+      uint8_t key_10[16];
+
+      for(int i=0; i<16; i++)
+         M9_subbed_rowshifted[i/4][i%4] = M9_recovered[i];
+
+      SubBytes(&M9_subbed_rowshifted);
+      ShiftRows(&M9_subbed_rowshifted);
+
+      for(int i=0; i<16; i++)
+         key_10[i] = correct_cyphertext[i] ^ M9_subbed_rowshifted[i/4][i%4];
+      
+      printf("[KEY_10]        : ");
+
+      for(int i=0; i<16; i++)
+         printf("%02X ", key_10[i]);
+
+      printf("\n");
+   }
+   ```
+
+
 
 How this matches assignment steps
 ---------------------------------
@@ -136,4 +252,28 @@ How this matches assignment steps
 
 Run output file
 ---------------
-- Results captured in `res_hijack`.
+- Results captured in `res_hijack`. They look like:
+```
+ECB encrypt: ============================================ CORRUPTIBLE_LOC: 15 ============================================
+
+		:: [Searching for cyphertext anomaly...]
+		:: [Diff State]        : 000000ba000000000000000000000000
+		:: [Post InvShiftRows] : 000000000000000000000000000000ba
+		:: non_zero_idx: 3, non_zero_byte: 0xBA
+		:: Byte values that satisfy `SB(M9) ^ SB(M9 ^ e) = BA`
+
+		:: C4		:: C5
+ECB encrypt: 
+		:: [Searching for cyphertext anomaly...]
+		:: [Diff State]        : 000000a8000000000000000000000000
+		:: [Post InvShiftRows] : 000000000000000000000000000000a8
+		:: non_zero_idx: 3, non_zero_byte: 0xA8
+		:: Byte values that satisfy `SB(M9) ^ SB(M9 ^ e) = A8`
+
+		:: C4		:: C6
+		:: [Single M9 Byte found] : C4
+
+ECB encrypt: ============================================ FINAL RESULT ============================================
+		Recovered M9: BB 36 C7 EB 88 33 4D 49 A4 E7 11 2E 74 F1 82 C4 
+ :: [KEY_10]  : D0 14 F9 A8 C9 EE 25 89 E1 3F 0C C8 B6 63 0C A6 
+```
